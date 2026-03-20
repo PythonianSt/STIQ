@@ -3,12 +3,10 @@ from openai import OpenAI
 import os
 import pandas as pd
 from datetime import datetime
-import time
 
 # =========================
 # CONFIG
 # =========================
-# Check if API key exists in secrets
 if "OPENAI_API_KEY" not in st.secrets:
     st.error("OpenAI API key not found in secrets. Please add it to your Streamlit secrets.")
     st.stop()
@@ -18,8 +16,8 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 CSV_FILE = "sti_latest_record.csv"
 TOTAL_STEPS = 8
 
-# Get mode from query params, default to "student"
-mode = st.query_params.get("mode", ["student"])[0] if "mode" in st.query_params else "student"
+# FIX 1: st.query_params returns a plain string, not a list — removed broken [0] indexing
+mode = st.query_params.get("mode", "student")
 
 # =========================
 # STUDENT MODE
@@ -28,11 +26,15 @@ if mode == "student":
 
     st.title("🩺 STI Screening")
 
-    # Initialize session state
+    # FIX 5: Guard each key independently so partial resets don't leave stale state
     if "step" not in st.session_state:
         st.session_state.step = 0
+    if "answers" not in st.session_state:
         st.session_state.answers = []
+    if "show_result" not in st.session_state:
         st.session_state.show_result = False
+    if "result_text" not in st.session_state:
+        st.session_state.result_text = ""
 
     QUESTIONS = [
         "เพศของคุณ",
@@ -52,7 +54,6 @@ if mode == "student":
         st.progress(st.session_state.step / TOTAL_STEPS)
         st.subheader(QUESTIONS[st.session_state.step])
 
-        # Use a unique key for radio button
         ans = st.radio("เลือก:", options, key=f"q_{st.session_state.step}")
 
         if st.button("ถัดไป", key=f"next_{st.session_state.step}"):
@@ -61,9 +62,11 @@ if mode == "student":
             st.rerun()
 
     elif not st.session_state.show_result:
-        
-        # Prepare prompt with context
-        prompt = f"Based on the following STI risk assessment answers: {st.session_state.answers}. Please provide a risk assessment (low, medium, or high) and recommendations in Thai language."
+
+        prompt = (
+            f"Based on the following STI risk assessment answers: {st.session_state.answers}. "
+            "Please provide a risk assessment (low, medium, or high) and recommendations in Thai language."
+        )
 
         try:
             with st.spinner("กำลังวิเคราะห์..."):
@@ -88,17 +91,15 @@ if mode == "student":
                 "comment": text
             }
 
-            # Create DataFrame and save to CSV
             df = pd.DataFrame([data])
             df.to_csv(CSV_FILE, index=False)
 
-            st.success("ส่งข้อมูลแล้ว")
-            st.write(text)
-
-            # Set flag to show result
+            # FIX 2 & 3: Store result text in session_state BEFORE rerun
+            # so it can be displayed after the rerun in the else block below
+            st.session_state.result_text = text
             st.session_state.show_result = True
             st.rerun()
-            
+
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาด: {str(e)}")
             if st.button("ลองอีกครั้ง"):
@@ -106,11 +107,15 @@ if mode == "student":
                 st.rerun()
 
     else:
-        # Show result and option to restart
+        # FIX 3: Now correctly displays the saved result after rerun
+        st.success("ส่งข้อมูลแล้ว")
+        st.write(st.session_state.result_text)
+
         if st.button("เริ่มใหม่"):
             st.session_state.step = 0
             st.session_state.answers = []
             st.session_state.show_result = False
+            st.session_state.result_text = ""
             st.rerun()
 
 # =========================
@@ -119,12 +124,10 @@ if mode == "student":
 else:
 
     st.title("👨‍⚕️ Doctor View")
-    
-    # Add refresh button
+
     if st.button("🔄 รีเฟรช"):
         st.rerun()
 
-    # Check if file exists
     if not os.path.exists(CSV_FILE):
         st.warning("รอข้อมูลผู้ป่วย...")
         st.info("กรุณารอสักครู่ หรือกดปุ่มรีเฟรช")
@@ -137,16 +140,14 @@ else:
             st.warning("ไม่มีข้อมูล")
             st.stop()
 
-        # Get latest record
         latest = df.iloc[-1]
 
         risk = latest["risk_level"]
         comment = latest["comment"] if pd.notna(latest["comment"]) else "ไม่มีความคิดเห็น"
         timestamp = latest["timestamp"] if pd.notna(latest["timestamp"]) else "ไม่ระบุเวลา"
 
-        # Display risk with appropriate color
         col1, col2 = st.columns([1, 3])
-        
+
         with col1:
             if risk == "สูง":
                 st.error("🔴")
@@ -154,7 +155,7 @@ else:
                 st.warning("🟠")
             else:
                 st.success("🟢")
-        
+
         with col2:
             if risk == "สูง":
                 st.error("**ระดับความเสี่ยง: สูง**")
@@ -167,10 +168,12 @@ else:
         st.write("**ความคิดเห็น:**")
         st.write(comment)
         st.caption(f"บันทึกเมื่อ: {timestamp}")
-        
-        # Show all records in expander
+
         with st.expander("ดูประวัติทั้งหมด"):
             st.dataframe(df)
+
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการอ่านข้อมูล: {str(e)}")
             
     except Exception as e:
         st.error(f"เกิดข้อผิดพลาดในการอ่านข้อมูล: {str(e)}")
