@@ -3,20 +3,28 @@ from openai import OpenAI
 import os
 import pandas as pd
 from datetime import datetime
+import pathlib
 
 # =========================
 # CONFIG
 # =========================
+st.set_page_config(page_title="STI Screening", layout="wide")
+
+# ✅ FIX 1: Safe data folder (Streamlit Cloud compatible)
+DATA_PATH = pathlib.Path("data")
+DATA_PATH.mkdir(exist_ok=True)
+
+CSV_FILE = DATA_PATH / "sti_latest_record.csv"
+TOTAL_STEPS = 8
+
+# ✅ FIX 2: Secrets check
 if "OPENAI_API_KEY" not in st.secrets:
-    st.error("OpenAI API key not found in secrets. Please add it to your Streamlit secrets.")
+    st.error("❌ กรุณาใส่ OPENAI_API_KEY ใน Streamlit Secrets")
     st.stop()
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-CSV_FILE = "sti_latest_record.csv"
-TOTAL_STEPS = 8
-
-# FIX 1: st.query_params returns a plain string, not a list — removed broken [0] indexing
+# ✅ FIX 3: Query param safe
 mode = st.query_params.get("mode", "student")
 
 # =========================
@@ -26,7 +34,7 @@ if mode == "student":
 
     st.title("🩺 STI Screening")
 
-    # FIX 5: Guard each key independently so partial resets don't leave stale state
+    # Session state init
     if "step" not in st.session_state:
         st.session_state.step = 0
     if "answers" not in st.session_state:
@@ -49,6 +57,11 @@ if mode == "student":
 
     options = ["ใช่", "ไม่ใช่", "ไม่แน่ใจ"]
 
+    # Safety guard
+    if len(st.session_state.answers) > TOTAL_STEPS:
+        st.session_state.answers = st.session_state.answers[:TOTAL_STEPS]
+
+    # Question flow
     if st.session_state.step < TOTAL_STEPS and not st.session_state.show_result:
 
         st.progress(st.session_state.step / TOTAL_STEPS)
@@ -70,15 +83,16 @@ if mode == "student":
 
         try:
             with st.spinner("กำลังวิเคราะห์..."):
+
+                # ✅ FIX 4: removed invalid timeout
                 res = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    timeout=30
+                    messages=[{"role": "user", "content": prompt}]
                 )
 
             text = res.choices[0].message.content
 
-            # Determine risk level
+            # Risk detection
             risk = "ต่ำ"
             if "สูง" in text:
                 risk = "สูง"
@@ -86,29 +100,36 @@ if mode == "student":
                 risk = "ปานกลาง"
 
             data = {
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "risk_level": risk,
                 "comment": text
             }
 
-            df = pd.DataFrame([data])
-            df.to_csv(CSV_FILE, index=False)
+            df_new = pd.DataFrame([data])
 
-            # FIX 2 & 3: Store result text in session_state BEFORE rerun
-            # so it can be displayed after the rerun in the else block below
+            # ✅ FIX 5: Append instead of overwrite
+            if os.path.exists(CSV_FILE):
+                df_old = pd.read_csv(CSV_FILE)
+                df_all = pd.concat([df_old, df_new], ignore_index=True)
+            else:
+                df_all = df_new
+
+            df_all.to_csv(CSV_FILE, index=False)
+
+            # Save to session
             st.session_state.result_text = text
             st.session_state.show_result = True
             st.rerun()
 
         except Exception as e:
-            st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+            st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+
             if st.button("ลองอีกครั้ง"):
                 st.session_state.show_result = False
                 st.rerun()
 
     else:
-        # FIX 3: Now correctly displays the saved result after rerun
-        st.success("ส่งข้อมูลแล้ว")
+        st.success("✅ ส่งข้อมูลแล้ว")
         st.write(st.session_state.result_text)
 
         if st.button("เริ่มใหม่"):
@@ -123,14 +144,13 @@ if mode == "student":
 # =========================
 else:
 
-    st.title("👨‍⚕️ Doctor View")
+    st.title("👨‍⚕️ Doctor Dashboard")
 
     if st.button("🔄 รีเฟรช"):
         st.rerun()
 
     if not os.path.exists(CSV_FILE):
-        st.warning("รอข้อมูลผู้ป่วย...")
-        st.info("กรุณารอสักครู่ หรือกดปุ่มรีเฟรช")
+        st.warning("⏳ ยังไม่มีข้อมูลผู้ป่วย")
         st.stop()
 
     try:
@@ -140,40 +160,39 @@ else:
             st.warning("ไม่มีข้อมูล")
             st.stop()
 
-        latest = df.iloc[-1]
+        st.subheader("📊 Patient Queue")
 
-        risk = latest["risk_level"]
-        comment = latest["comment"] if pd.notna(latest["comment"]) else "ไม่มีความคิดเห็น"
-        timestamp = latest["timestamp"] if pd.notna(latest["timestamp"]) else "ไม่ระบุเวลา"
+        # ✅ Sort high risk first
+        risk_order = {"สูง": 0, "ปานกลาง": 1, "ต่ำ": 2}
+        df["priority"] = df["risk_level"].map(risk_order)
+        df = df.sort_values(by="priority")
 
-        col1, col2 = st.columns([1, 3])
+        for i, row in df.iterrows():
 
-        with col1:
-            if risk == "สูง":
-                st.error("🔴")
-            elif risk == "ปานกลาง":
-                st.warning("🟠")
-            else:
-                st.success("🟢")
+            risk = row["risk_level"]
+            comment = row["comment"]
+            timestamp = row["timestamp"]
 
-        with col2:
-            if risk == "สูง":
-                st.error("**ระดับความเสี่ยง: สูง**")
-            elif risk == "ปานกลาง":
-                st.warning("**ระดับความเสี่ยง: ปานกลาง**")
-            else:
-                st.success("**ระดับความเสี่ยง: ต่ำ**")
+            with st.container():
+                col1, col2 = st.columns([1, 4])
 
-        st.divider()
-        st.write("**ความคิดเห็น:**")
-        st.write(comment)
-        st.caption(f"บันทึกเมื่อ: {timestamp}")
+                with col1:
+                    if risk == "สูง":
+                        st.error("🔴")
+                    elif risk == "ปานกลาง":
+                        st.warning("🟠")
+                    else:
+                        st.success("🟢")
 
-        with st.expander("ดูประวัติทั้งหมด"):
+                with col2:
+                    st.write(f"**ความเสี่ยง: {risk}**")
+                    st.caption(f"🕒 {timestamp}")
+                    st.write(comment)
+
+                st.divider()
+
+        with st.expander("ดูข้อมูลทั้งหมด"):
             st.dataframe(df)
 
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านข้อมูล: {str(e)}")
-            
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านข้อมูล: {str(e)}")
+        st.error(f"❌ อ่านข้อมูลผิดพลาด: {str(e)}")
