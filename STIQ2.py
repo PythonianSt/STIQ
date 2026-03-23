@@ -83,12 +83,15 @@ if mode == "student":
 
         prompt = (
             f"Based on the following STI risk assessment answers: {st.session_state.answers}. "
-            "Please provide a risk assessment (low, medium, or high) and recommendations in Thai language."
+            "Please provide recommendations in Thai language. "
+            "At the very end of your response, on its own line, write exactly one of these three lines and nothing else after it:\n"
+            "RISK:สูง\n"
+            "RISK:ปานกลาง\n"
+            "RISK:ต่ำ"
         )
 
         try:
             with st.spinner("กำลังวิเคราะห์..."):
-                # FIX 4: Remove unsupported `timeout` kwarg from openai v1 SDK
                 res = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}]
@@ -96,23 +99,36 @@ if mode == "student":
 
             text = res.choices[0].message.content
 
-            # Determine risk level
+            # Reliably extract risk level from the structured RISK: tag
             risk = "ต่ำ"
-            if "สูง" in text:
-                risk = "สูง"
-            elif "ปานกลาง" in text:
-                risk = "ปานกลาง"
+            for line in reversed(text.strip().splitlines()):
+                line = line.strip()
+                if line == "RISK:สูง":
+                    risk = "สูง"
+                    break
+                elif line == "RISK:ปานกลาง":
+                    risk = "ปานกลาง"
+                    break
+                elif line == "RISK:ต่ำ":
+                    risk = "ต่ำ"
+                    break
+
+            # Strip the RISK: tag from the displayed text
+            display_text = "\n".join(
+                line for line in text.splitlines()
+                if not line.strip().startswith("RISK:")
+            ).strip()
 
             data = {
                 "timestamp": datetime.now(),
                 "risk_level": risk,
-                "comment": text
+                "comment": display_text
             }
 
             df = pd.DataFrame([data])
             df.to_csv(CSV_FILE, index=False)
 
-            st.session_state.result_text = text
+            st.session_state.result_text = display_text
             st.session_state.show_result = True
             st.rerun()
 
